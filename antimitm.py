@@ -87,7 +87,12 @@ def print_error(message):
     print(colored(f"[!] {message}", 'red'))
 
 def log_message(message, level="INFO"):
+    """Log messages to console and file if logging is enabled"""
     global verbose_mode, log_file_path
+    
+    # Don't log if logging is disabled
+    if log_file_path is None:
+        return
     
     color_map = {
         "INFO": "blue",
@@ -106,11 +111,15 @@ def log_message(message, level="INFO"):
         else:
             print(f"[{timestamp}] {message}")
     
-    try:    
-        with open(log_file_path, "a") as log_file:
-            log_file.write(f"{timestamp} - [{level}] {message}\n")
-    except Exception as e:
-        print(colored(f"[!] Log file write error: {e}", "red"))
+    # Only write to log file if logging is enabled
+    if log_file_path:
+        try:    
+            with open(log_file_path, "a") as log_file:
+                log_file.write(f"{timestamp} - [{level}] {message}\n")
+        except Exception as e:
+            print(colored(f"[!] Log file write error: {e}", "red"))
+            # Disable logging if there's an error writing to the log file
+            log_file_path = None
 
 def cache_mac_address(ip, mac):
     """Cache MAC addresses to reduce network requests"""
@@ -624,7 +633,20 @@ def generate_report():
 
 def menu():
     """Display enhanced menu with color and options"""
-    print_banner()
+    # Using clear numbers instead of emojis for the monitoring status
+    if is_running:
+        status_line = colored("[MONITORING ACTIVE]", "green", attrs=["bold"])
+        if start_time:
+            elapsed = datetime.now() - start_time
+            elapsed_str = f"{elapsed.seconds // 3600}h {(elapsed.seconds // 60) % 60}m {elapsed.seconds % 60}s"
+            status_line += colored(f" (Running: {elapsed_str})", "cyan")
+        print(status_line)
+    else:
+        print(colored("[MONITORING INACTIVE]", "yellow"))
+    
+    print("\n" + "=" * 60)
+    print(colored("AntiMITM Tool - ARP Spoofing & MITM Attack Detection", "cyan", attrs=["bold"]))
+    print("=" * 60 + "\n")
     
     menu_options = [
         ("1", "Select Network Interface", "Choose a network interface to monitor"),
@@ -634,33 +656,24 @@ def menu():
         ("5", "Show Statistics", "Display detection statistics"),
         ("6", "Show Discovered Hosts", "List all hosts discovered on the network"),
         ("7", "Generate Report", "Create a detailed report file"),
-        ("8", "Exit", "Exit the application")
+        ("8", "Toggle Logging", "Enable/Disable logging to file"),
+        ("9", "Exit", "Exit the application")
     ]
-    
-    # Display active monitoring status
-    if is_running:
-        status_line = colored("● MONITORING ACTIVE", "green", attrs=["bold"])
-        if start_time:
-            elapsed = datetime.now() - start_time
-            elapsed_str = f"{elapsed.seconds // 3600}h {(elapsed.seconds // 60) % 60}m {elapsed.seconds % 60}s"
-            status_line += colored(f" (Running: {elapsed_str})", "cyan")
-        print(status_line)
-    else:
-        print(colored("◯ MONITORING INACTIVE", "yellow"))
-    
-    print("\n" + "=" * 60)
-    
-    # Terminal width
-    terminal_width = 80
     
     # Create formatted menu
     for option, title, description in menu_options:
-        option_text = colored(f" {option} ", "white", "on_blue")
-        title_text = colored(f" {title}", "cyan")
-        print(f"{option_text}{title_text}")
+        option_text = colored(f"[{option}]", "cyan")
+        title_text = colored(f" {title}", "white")
+        print(f"{option_text} {title_text}")
         print(colored(f"     {description}", "white"))
     
     print("=" * 60)
+    
+    # Show current logging status
+    if log_file_path:
+        print(colored(f"Logging: ENABLED ({log_file_path})", "green"))
+    else:
+        print(colored("Logging: DISABLED", "yellow"))
     
     choice = input(colored("\nEnter your choice: ", "green"))
     return choice
@@ -676,15 +689,33 @@ def parse_arguments():
     parser.add_argument('-s', '--stats', action='store_true', help='Show statistics')
     parser.add_argument('-l', '--list-interfaces', action='store_true', help='List all available network interfaces')
     parser.add_argument('-t', '--time', type=int, help='Duration in seconds to run the monitoring (0 for indefinite)')
-    parser.add_argument('--log-file', default="/var/log/securonis/antimitm.log", 
-                       help='Log file path (default: /var/log/securonis/antimitm.log)')
-    parser.add_argument('--report-dir', default="/var/log/securonis/reports", 
-                       help='Directory to save reports (default: /var/log/securonis/reports)')
-    parser.add_argument('--config-dir', default="/etc/securonis/antimitm", 
-                       help='Configuration files directory (default: /etc/securonis/antimitm)')
+    parser.add_argument('--log-file', default="antimitm.log", 
+                       help='Log file path (default: antimitm.log) or "none" to disable logging')
+    parser.add_argument('--report-dir', default="reports", 
+                       help='Directory to save reports (default: reports)')
+    parser.add_argument('--config-dir', default="config", 
+                       help='Configuration files directory (default: config)')
+    parser.add_argument('--no-log', action='store_true', help='Disable logging to file')
     parser.add_argument('--version', action='version', version='AntiMITM v2.0 - Developed by root0emir')
     
     return parser.parse_args()
+
+def display_system_info():
+    """Display basic system information only once at startup"""
+    print_banner()
+    print_info(f"AntiMITM v2.0 - Running")
+    if log_file_path:
+        print_info(f"Logging enabled: {log_file_path}")
+    else:
+        print_info("Logging disabled")
+    print_info(f"Report directory: {report_dir}")
+    
+    # Check for iptables
+    try:
+        subprocess.run(["iptables", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except:
+        print_error("iptables not found! IP blocking may not work.")
+        print_warning("To install iptables: apt-get install iptables")
 
 def main():
     """Main application function with improved flow and error handling"""
@@ -699,32 +730,33 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
     
-    # Set verbose mode and paths
+    # Set verbose mode
     verbose_mode = args.verbose
     
-    # Check if log file and directories are writable
-    for path, description in [
-        (args.log_file, "log file"),
-        (args.report_dir, "report directory"),
-        (args.config_dir, "configuration directory")
-    ]:
-        # Get directory path
-        directory = os.path.dirname(path) if os.path.dirname(path) else path
-        
-        # If directory doesn't exist or isn't writable, use default local directory
-        if not os.path.exists(directory) or not os.access(directory, os.W_OK):
-            if path == args.log_file:
-                log_file_path = "antimitm.log"
-                print(colored(f"[!] Cannot write to {path}. Using log file: {log_file_path}", "yellow"))
-            elif path == args.report_dir:
-                report_dir = "reports"
-                print(colored(f"[!] Cannot write to {path}. Using report directory: {report_dir}", "yellow"))
-            # Config directory is checked in load_blocked_ips function
+    # Handle logging options
+    if args.no_log:
+        log_file_path = None
+        print(colored("[*] Logging disabled by command line option", "blue"))
+    elif args.log_file.lower() == "none":
+        log_file_path = None
+        print(colored("[*] Logging disabled by command line option", "blue"))
+    else:
+        # Check if log file is writable
+        log_dir = os.path.dirname(args.log_file) if os.path.dirname(args.log_file) else "."
+        if not os.path.exists(log_dir) or not os.access(log_dir, os.W_OK):
+            log_file_path = "antimitm.log"
+            print(colored(f"[!] Cannot write to {args.log_file}. Using log file: {log_file_path}", "yellow"))
         else:
-            if path == args.log_file:
-                log_file_path = path
-            elif path == args.report_dir:
-                report_dir = path
+            log_file_path = args.log_file
+    
+    # Check report directory
+    report_dir_path = args.report_dir
+    report_dir_parent = os.path.dirname(report_dir_path) if os.path.dirname(report_dir_path) else "."
+    if not os.path.exists(report_dir_parent) or not os.access(report_dir_parent, os.W_OK):
+        report_dir = "reports"
+        print(colored(f"[!] Cannot write to {args.report_dir}. Using report directory: {report_dir}", "yellow"))
+    else:
+        report_dir = report_dir_path
     
     # Check and create directories
     for directory in [report_dir]:
@@ -740,19 +772,9 @@ def main():
     # Load previously blocked IPs
     load_blocked_ips()
     
-    # Show welcome message
-    print_banner()
-    print_info(f"AntiMITM v2.0 - Running")
-    print_info(f"Log file: {log_file_path}")
-    print_info(f"Report directory: {report_dir}")
+    # Show welcome message (only once at startup)
+    display_system_info()
     
-    # Check for iptables
-    try:
-        subprocess.run(["iptables", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    except:
-        print_error("iptables not found! IP blocking may not work.")
-        print_warning("To install iptables: apt-get install iptables")
-        
     # Handle command line interface mode
     if args.list_interfaces:
         interfaces = list_interfaces()
@@ -831,8 +853,29 @@ def main():
             sys.exit(0)
     
     # If we get here, show interactive menu
+    interactive_menu(interface, gateway_ip, gateway_mac, target_ip, target_mac)
+
+def interactive_menu(interface, gateway_ip, gateway_mac, target_ip, target_mac):
+    """Interactive menu function separated to avoid duplicate banner display"""
+    global is_running, log_file_path
+    
+    # Clear screen before first menu display
+    os.system('clear' if os.name != 'nt' else 'cls')
+    
     while True:
         try:
+            # Display interface information if one is selected
+            if interface:
+                print(colored(f"\nSelected interface: {interface}", "green"))
+                if all([gateway_ip, gateway_mac, target_ip, target_mac]):
+                    print(colored(f"Connected as: {target_ip} ({target_mac})", "green"))
+                    print(colored(f"Gateway: {gateway_ip} ({gateway_mac})", "green"))
+                else:
+                    print(colored("Network information incomplete. Please reselect interface.", "yellow"))
+            else:
+                print(colored("\nNo interface selected. Please select a network interface first.", "yellow"))
+                
+            # Show menu and get choice
             choice = menu()
             
             if choice == "1":
@@ -881,6 +924,15 @@ def main():
                 generate_report()
                 
             elif choice == "8":
+                # Toggle logging
+                if log_file_path:
+                    log_file_path = None
+                    print_success("Logging disabled")
+                else:
+                    log_file_path = "antimitm.log"
+                    print_success(f"Logging enabled: {log_file_path}")
+                
+            elif choice == "9":
                 print_info("Exiting...")
                 if is_running:
                     stop_background_monitoring(gateway_ip, gateway_mac, target_ip, target_mac)
@@ -889,6 +941,10 @@ def main():
             else:
                 print_error("Invalid choice. Please try again.")
                 
+            # Clear screen before displaying the menu again
+            input(colored("\nPress Enter to continue...", "cyan"))
+            os.system('clear' if os.name != 'nt' else 'cls')
+                
         except KeyboardInterrupt:
             print_info("\nExiting...")
             if is_running:
@@ -896,6 +952,8 @@ def main():
             sys.exit(0)
         except Exception as e:
             print_error(f"An unexpected error occurred: {e}")
+            input(colored("\nPress Enter to continue...", "cyan"))
+            os.system('clear' if os.name != 'nt' else 'cls')
 
 def signal_handler():
     """Handle interrupt signals gracefully"""
